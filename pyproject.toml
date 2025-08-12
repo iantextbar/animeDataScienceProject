@@ -1,7 +1,7 @@
 [project]
 name = "animedatascienceproject-app"
 version = "0.1.0"
-description = "Add your description here"
+description = "Machine Learning project. We will extract data from MyAnimeList and use different LLMs and Neural Networks to perform NLP and image related tasks on the data."
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [

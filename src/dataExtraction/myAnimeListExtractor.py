@@ -13,7 +13,12 @@ import bs4
 #-------------------------
 # Global Variables
 
-DATAPATH = "../../data/"
+DATAPATH = "../../data/raw/"
+
+#-------------------------
+# Compiled Regex
+GENRE_DUPLICATE_RE = re.compile(r"\b(\w+)\b\s*\1\b", re.IGNORECASE)
+SCORE_RE = re.compile(r"(\d+(?:[.,]\d+)?)\D*(\d+(?:,\d+)?)")
 
 #-------------------------
 
@@ -99,113 +104,114 @@ class MyAnimeListExtractor:
             response = requests.get(link, headers=self.headers, timeout=random.uniform(0.5, 1.5))
         except:
             print('Could not extract image from link:', link)
+            return "No image"
 
         return response.content
 
-    def _extract_elements_anime_page(self, html_text, link):
-        """
-        Extracts relevant information from an anime page's HTML content.
-        Returns a dictionary with title, synopsis, genres, demographic, score, rank, and image.
-        _________________
-            html_text: (str) - Raw HTML of the anime page.
-        """
-
-        soup = bs4.BeautifulSoup(html_text, 'html.parser')
-        resultDict = {}
-        
-        # Title
+    def _parse_titles(self, soup: bs4.BeautifulSoup, link: str) -> dict:
         try:
-          title = soup.find('h1', class_="title-name h1_bold_none").text
-          title_english = soup.find('p', class_="title-english title-inherit").text
-          resultDict['title'] = title
-          resultDict['title_english'] = title_english
-        except:
-          title_from_link = link.split('/')[-1]
-          resultDict['title'] = title_from_link
-          resultDict['title_english'] = title_from_link
+            return {
+                "title": soup.find("h1", class_="title-name h1_bold_none").text.strip(),
+                "title_english": soup.find("p", class_="title-english title-inherit").text.strip()
+            }
+        except AttributeError:
+            title_from_link = link.split("/")[-1]
+            return {"title": title_from_link, "title_english": title_from_link}
+        
+    def _parse_synopsis(self, soup: bs4.BeautifulSoup) -> str:
+        synopsis_tag = soup.find("p", itemprop="description")
+        return synopsis_tag.text.strip() if synopsis_tag else "Not found"
 
-        # Synopsis
-        synopsis = [item.text for item in soup.find_all('p') if item.get('itemprop') == 'description'][0]
-        resultDict['synopsis'] = synopsis
-
-        # Genre and rating, demographic and ranking
-        for element in soup.find_all('div', class_='spaceit_pad'):
-
-            text_element = element.get_text()
-
+    def _parse_metadata(self, soup: bs4.BeautifulSoup) -> dict:
+        data = {}
+        for element in soup.find_all("div", class_="spaceit_pad"):
             if not element.span:
-              continue
-          
-            if ':' in text_element:
-            
-                text_list = text_element.lower().split(':')
-                field = text_list[0].replace('\n', '').strip()
-                value = text_list[1].replace('\n', '').strip()
+                continue
 
-                if field == 'genres':
-                  regex_pattern = r"(\w+)\1"
-                  value = re.sub(regex_pattern, r"\1", value)
-                  value = re.sub(r'\s', "", value)
-                  value = value.split(',')
+            text_element = element.get_text(separator=" ", strip=True)
+            if ":" not in text_element:
+                continue
 
-                resultDict[field] = value
-  
-                if field == 'score':
-                  regex_pattern = r"(\d+(?:[.,]\d+)?)\D*(\d+(?:,\d+)?)"
-                  match = re.search(regex_pattern, value)
-  
-                  if match:
-                      first_number = match.group(1)
-                      second_number = match.group(2)
-                      resultDict['score'] = first_number
-                      resultDict['score_count'] = second_number
-                  else:
-                      resultDict['score'] = "Not found"
-                      resultDict['score_count'] = "Not found"
+            field, value = [part.strip() for part in text_element.split(":", 1)]
+            field = field.lower()
 
-                if field == 'demographic':
-                  resultDict[field] = value
+            if field == "genres":
+                value = [GENRE_DUPLICATE_RE.sub(r"\1", v).strip() for v in value.split(",")]
+            elif field == "score":
+                match = SCORE_RE.search(value)
+                data["score"] = match.group(1) if match else "Not found"
+                data["score_count"] = match.group(2) if match else "Not found"
+            elif field == "ranked":
+                value = value.replace("22    based on the top anime page. please note that 'not yet aired' and 'r18+' titles are excluded.", "").strip()
 
-                if field == 'ranked':
-                  ranking = value.replace("22    based on the top anime page. please note that 'not yet aired' and 'r18+' titles are excluded.", "")
-                  resultDict[field] = ranking
+            data[field] = value
+        return data
 
-        if 'genres' not in resultDict:
-            resultDict['genres'] = "Not found"
-        if 'score' not in resultDict:
-            resultDict['score'] = "Not found"
-            resultDict['score_count'] = "Not found"
-        if 'demographic' not in resultDict:
-            resultDict['demographic'] = "Not found"
-        if 'ranked' not in resultDict:
-            resultDict['ranked'] = "Not found"
-                      
-
-        # Getting image
-        resultDict['image'] = self._get_image_bytes(soup)
-
-        return resultDict
-
-    def fetch_anime_data(
-            self, link: str
-        ) -> Dict[str, Any]:
+    def _extract_elements_anime_page(self, html_text: str, link: str) -> dict:
         """
-        Fetches and extracts relevant data for a given anime page link.
+        Extract relevant information from an anime page's HTML content.
+
+        Args:
+            html_text (str): Raw HTML of the anime page.
+            link (str): URL to the anime page.
+
+        Returns:
+            dict: Extracted fields including:
+                - title
+                - title_english
+                - synopsis
+                - genres
+                - demographic
+                - score
+                - score_count
+                - rank
+                - image (bytes)
+        """
+        soup = bs4.BeautifulSoup(html_text, "html.parser")
+        result = {}
+
+        result.update(self._parse_titles(soup, link))
+        result["synopsis"] = self._parse_synopsis(soup)
+        result.update(self._parse_metadata(soup))
+        result["image"] = self._get_image_bytes(soup)
+
+        return result
+
+    def fetch_anime_data(self, link: str) -> Dict[str, Any]:
+        """
+        Fetches and extracts relevant data for a given anime page link with exponential backoff.
         _________________
             link: (str) - URL to the anime's MyAnimeList page.
         """
-        try:
-            response = requests.get(link, headers=self.headers, timeout=random.randint(1, 3))
-        except:
-            print('Unable to get results for link', link)
+        max_retries = 3
+        backoff = 2  
+        for attempt in range(max_retries):
+            if attempt == 2:
+                sleep(random.randint(10, 15))
+            try:
+                response = requests.get(
+                    link,
+                    headers=self.headers,
+                    timeout=random.randint(1, 3)
+                )
 
-        # Extract elements we are interested in from html
-        elements_dict = self._extract_elements_anime_page(response.text, link)
+                if response.status_code == 200:
+                    return self._extract_elements_anime_page(response.text, link)
+                elif response.status_code in [403, 429, 503]:
+                    print(f"Blocked or rate-limited on attempt {attempt+1}, retrying after {backoff} seconds...")
+                    sleep(backoff)
+                    backoff *= 2  # exponential backoff
+                else:
+                    print(f"Unexpected status code {response.status_code} for {link}")
+                    break
 
-        return elements_dict
+            except requests.exceptions.RequestException as e:
+                print(f"Request failed on attempt {attempt+1}: {e}")
+                sleep(backoff)
+                backoff *= 2
 
     def fetch_all_anime_data(
-            self, totalResults: int = 1000
+            self, startingPoint: int = 0, totalResults: int = 1000
         ):
         """
         Iterates over top anime links and collects detailed data for each.
@@ -217,7 +223,7 @@ class MyAnimeListExtractor:
         assert totalResults % 50 == 0
 
         print('######### STARTED COLLECTING ALL LINKS #########')
-        anime_links = self.get_top_anime_links(totalResults)
+        anime_links = self.get_top_anime_links(startingPoint, totalResults)
         print('######### FINISHED COLLECTING ALL LINKS #########')
 
         all_animes = []
@@ -226,16 +232,22 @@ class MyAnimeListExtractor:
         for link in tqdm(anime_links, desc="Links Processed", total=totalResults):
 
             animeDict = self.fetch_anime_data(link)
+            if not animeDict:
+                print('Lets wait a little...')
+                sleep(random.randint(15, 30))
+                continue
+
             all_animes.append(animeDict)
-            file_name = animeDict['title'] + datetime.date.today().strftime('%Y%m%d') + '.pkl'
+            file_name = DATAPATH + animeDict['title'].replace('/', '') + datetime.date.today().strftime('%Y%m%d') + '.pkl'
             with open(file_name, 'wb') as handler:
                 pickle.dump(animeDict, handler)
+            print('Collected data for:', animeDict['title'].replace('/', ''))
             sleep(random.uniform(1.5, 3))
         print('######### DATA COLLECTED #########')
 
 if __name__ == "__main__":
     
     scraper = MyAnimeListExtractor()
-    scraper.fetch_all_anime_data(totalResults=1000)
+    scraper.fetch_all_anime_data(startingPoint=50, totalResults=150)
 
 
